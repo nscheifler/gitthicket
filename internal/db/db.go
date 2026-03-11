@@ -141,6 +141,21 @@ func (db *DB) CreateAgent(ctx context.Context, id, apiKeyHash string) (*model.Ag
 	}, nil
 }
 
+func (db *DB) DisableAgent(ctx context.Context, id string, when time.Time) error {
+	result, err := db.sql.ExecContext(ctx, `UPDATE agents SET disabled_at = ? WHERE id = ?`, formatTime(when.UTC()), id)
+	if err != nil {
+		return fmt.Errorf("disable agent: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("disable agent rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (db *DB) GetAgentByAPIKeyHash(ctx context.Context, apiKeyHash string) (*model.Agent, error) {
 	row := db.sql.QueryRowContext(
 		ctx,

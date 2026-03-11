@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,45 +12,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gitthicket/internal/auth"
 	"gitthicket/internal/db"
 	"gitthicket/internal/gitrepo"
+	"gitthicket/internal/model"
 	"gitthicket/internal/server"
 )
 
 func TestEndToEndHTTPFlow(t *testing.T) {
 	t.Parallel()
 
-	dataDir := t.TempDir()
-	store, err := db.Open(filepath.Join(dataDir, "gitthicket.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer store.Close()
-
-	repo, err := gitrepo.Open(filepath.Join(dataDir, "repo.git"))
-	if err != nil {
-		t.Fatalf("open repo: %v", err)
-	}
-
-	handler := server.New(server.Config{
-		MaxBundleBytes:    10 * 1024 * 1024,
-		MaxPushesPerHour:  100,
-		MaxPostsPerHour:   100,
-		MaxCommitsPerPush: 1000,
-		DiffMaxBytes:      32 * 1024,
-	}, store, repo, auth.NewAuthenticator(store, "admin-secret"))
-
-	createResp := doJSONRequest(t, handler, http.MethodPost, "/api/admin/agents", "admin-secret", map[string]string{"id": "agent-1"})
-	if createResp.Code != http.StatusCreated {
-		t.Fatalf("create agent status=%d body=%s", createResp.Code, createResp.Body.String())
-	}
-	var created struct {
-		ID     string `json:"id"`
-		APIKey string `json:"api_key"`
-	}
-	decodeJSONBody(t, createResp.Body.Bytes(), &created)
+	repo, _, handler, created := newTestServerWithAgent(t)
+	_ = repo
 
 	channelsResp := doRequest(t, handler, http.MethodGet, "/api/channels", created.APIKey, nil, "")
 	if channelsResp.Code != http.StatusOK {
@@ -107,31 +83,8 @@ func TestEndToEndHTTPFlow(t *testing.T) {
 		t.Fatalf("unexpected reply parent: %#v", reply)
 	}
 
-	sourceDir := t.TempDir()
-	runGitHTTP(t, sourceDir, "init")
-	runGitHTTP(t, sourceDir, "config", "user.name", "Agent One")
-	runGitHTTP(t, sourceDir, "config", "user.email", "agent@example.com")
-	writeFileHTTP(t, filepath.Join(sourceDir, "README.md"), "one\n")
-	runGitHTTP(t, sourceDir, "add", "README.md")
-	runGitHTTP(t, sourceDir, "commit", "-m", "root")
-	rootHash := strings.TrimSpace(runGitHTTP(t, sourceDir, "rev-parse", "HEAD"))
-
-	writeFileHTTP(t, filepath.Join(sourceDir, "README.md"), "one\ntwo\n")
-	runGitHTTP(t, sourceDir, "add", "README.md")
-	runGitHTTP(t, sourceDir, "commit", "-m", "head")
-	headHash := strings.TrimSpace(runGitHTTP(t, sourceDir, "rev-parse", "HEAD"))
-
-	bundlePath := filepath.Join(t.TempDir(), "push.bundle")
-	tempRef := "refs/gitthicket/push/test"
-	runGitHTTP(t, sourceDir, "update-ref", tempRef, "HEAD")
-	runGitHTTP(t, sourceDir, "bundle", "create", bundlePath, tempRef)
-	runGitHTTP(t, sourceDir, "update-ref", "-d", tempRef)
-	bundleBytes, err := os.ReadFile(bundlePath)
-	if err != nil {
-		t.Fatalf("read bundle: %v", err)
-	}
-
-	pushResp := doRequest(t, handler, http.MethodPost, "/api/git/push", created.APIKey, bundleBytes, "application/octet-stream")
+	_, bundlePath, rootHash, headHash := makeCommitBundle(t)
+	pushResp := doRequest(t, handler, http.MethodPost, "/api/git/push", created.APIKey, mustReadFile(t, bundlePath), "application/octet-stream")
 	if pushResp.Code != http.StatusOK {
 		t.Fatalf("push bundle status=%d body=%s", pushResp.Code, pushResp.Body.String())
 	}
@@ -202,6 +155,185 @@ func TestEndToEndHTTPFlow(t *testing.T) {
 	}
 }
 
+func TestAuthFailuresReturnJSON(t *testing.T) {
+	t.Parallel()
+
+	_, store, handler, created := newTestServerWithAgent(t)
+
+	missingResp := doRequest(t, handler, http.MethodGet, "/api/channels", "", nil, "")
+	assertJSONError(t, missingResp, http.StatusUnauthorized, "missing bearer token")
+
+	malformedResp := doRawRequest(t, handler, http.MethodGet, "/api/channels", "Token nope", nil, "")
+	assertJSONError(t, malformedResp, http.StatusUnauthorized, "malformed bearer token")
+
+	adminResp := doRequest(t, handler, http.MethodPost, "/api/admin/agents", created.APIKey, []byte(`{"id":"x"}`), "application/json")
+	assertJSONError(t, adminResp, http.StatusUnauthorized, "invalid admin key")
+
+	if _, err := store.CreateAgent(context.Background(), "agent-disabled", auth.HashAPIKey("disabled-key")); err != nil {
+		t.Fatalf("create disabled agent: %v", err)
+	}
+	if err := store.DisableAgent(context.Background(), "agent-disabled", time.Now().UTC()); err != nil {
+		t.Fatalf("disable agent: %v", err)
+	}
+	disabledResp := doRequest(t, handler, http.MethodGet, "/api/channels", "disabled-key", nil, "")
+	assertJSONError(t, disabledResp, http.StatusUnauthorized, "disabled agent key")
+}
+
+func TestRateLimitRejection(t *testing.T) {
+	t.Parallel()
+
+	_, _, handler, created := newTestServerWithAgent(t, func(cfg *server.Config) {
+		cfg.MaxPostsPerHour = 1
+	})
+
+	first := doJSONRequest(t, handler, http.MethodPost, "/api/channels/general/posts", created.APIKey, map[string]any{"body": "first"})
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first post status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	second := doJSONRequest(t, handler, http.MethodPost, "/api/channels/general/posts", created.APIKey, map[string]any{"body": "second"})
+	assertJSONError(t, second, http.StatusTooManyRequests, "rate limit exceeded for post")
+	if second.Header().Get("Retry-After") == "" {
+		t.Fatalf("expected retry-after header on rate limit response")
+	}
+}
+
+func TestPushRollbackRemovesOnlyNewRefs(t *testing.T) {
+	t.Parallel()
+
+	repo, _, handler, created := newTestServerWithAgent(t)
+
+	sourceDir := t.TempDir()
+	runGitHTTP(t, sourceDir, "init")
+	runGitHTTP(t, sourceDir, "config", "user.name", "Agent One")
+	runGitHTTP(t, sourceDir, "config", "user.email", "agent@example.com")
+	writeFileHTTP(t, filepath.Join(sourceDir, "README.md"), "one\n")
+	runGitHTTP(t, sourceDir, "add", "README.md")
+	runGitHTTP(t, sourceDir, "commit", "-m", "root")
+	rootHash := strings.TrimSpace(runGitHTTP(t, sourceDir, "rev-parse", "HEAD"))
+	bundlePath1 := filepath.Join(t.TempDir(), "push-1.bundle")
+	runGitHTTP(t, sourceDir, "bundle", "create", bundlePath1, "HEAD")
+
+	push1 := doRequest(t, handler, http.MethodPost, "/api/git/push", created.APIKey, mustReadFile(t, bundlePath1), "application/octet-stream")
+	if push1.Code != http.StatusOK {
+		t.Fatalf("initial push status=%d body=%s", push1.Code, push1.Body.String())
+	}
+	if !gitRefExists(t, repo.Path, gitrepo.CommitRef(rootHash)) {
+		t.Fatalf("expected root commit ref after initial push")
+	}
+
+	writeFileHTTP(t, filepath.Join(sourceDir, "README.md"), "one\ntwo\n")
+	runGitHTTP(t, sourceDir, "add", "README.md")
+	runGitHTTP(t, sourceDir, "commit", "-m", "head")
+	headHash := strings.TrimSpace(runGitHTTP(t, sourceDir, "rev-parse", "HEAD"))
+	bundlePath2 := filepath.Join(t.TempDir(), "push-2.bundle")
+	runGitHTTP(t, sourceDir, "bundle", "create", bundlePath2, "HEAD", "^"+rootHash)
+
+	srv := extractServer(t, handler)
+	srv.SetCommitIndexerForTests(func(context.Context, []model.Commit, *string) ([]string, error) {
+		return nil, errors.New("boom")
+	})
+	defer srv.SetCommitIndexerForTests(nil)
+
+	push2 := doRequest(t, handler, http.MethodPost, "/api/git/push", created.APIKey, mustReadFile(t, bundlePath2), "application/octet-stream")
+	assertJSONError(t, push2, http.StatusInternalServerError, "failed to index imported commits")
+
+	if !gitRefExists(t, repo.Path, gitrepo.CommitRef(rootHash)) {
+		t.Fatalf("expected existing ref %s to survive rollback", rootHash)
+	}
+	if gitRefExists(t, repo.Path, gitrepo.CommitRef(headHash)) {
+		t.Fatalf("expected new ref %s to be rolled back", headHash)
+	}
+}
+
+func newTestServerWithAgent(t *testing.T, opts ...func(*server.Config)) (*gitrepo.Repo, *db.DB, http.Handler, struct {
+	ID     string `json:"id"`
+	APIKey string `json:"api_key"`
+}) {
+	t.Helper()
+
+	dataDir := t.TempDir()
+	store, err := db.Open(filepath.Join(dataDir, "gitthicket.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	repo, err := gitrepo.Open(filepath.Join(dataDir, "repo.git"))
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+
+	cfg := server.Config{
+		MaxBundleBytes:    10 * 1024 * 1024,
+		MaxPushesPerHour:  100,
+		MaxPostsPerHour:   100,
+		MaxCommitsPerPush: 1000,
+		DiffMaxBytes:      32 * 1024,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	handler := server.New(cfg, store, repo, auth.NewAuthenticator(store, "admin-secret"))
+
+	createResp := doJSONRequest(t, handler, http.MethodPost, "/api/admin/agents", "admin-secret", map[string]string{"id": "agent-1"})
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create agent status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+	var created struct {
+		ID     string `json:"id"`
+		APIKey string `json:"api_key"`
+	}
+	decodeJSONBody(t, createResp.Body.Bytes(), &created)
+	return repo, store, handler, created
+}
+
+func makeCommitBundle(t *testing.T) (string, string, string, string) {
+	t.Helper()
+	sourceDir := t.TempDir()
+	runGitHTTP(t, sourceDir, "init")
+	runGitHTTP(t, sourceDir, "config", "user.name", "Agent One")
+	runGitHTTP(t, sourceDir, "config", "user.email", "agent@example.com")
+	writeFileHTTP(t, filepath.Join(sourceDir, "README.md"), "one\n")
+	runGitHTTP(t, sourceDir, "add", "README.md")
+	runGitHTTP(t, sourceDir, "commit", "-m", "root")
+	rootHash := strings.TrimSpace(runGitHTTP(t, sourceDir, "rev-parse", "HEAD"))
+	writeFileHTTP(t, filepath.Join(sourceDir, "README.md"), "one\ntwo\n")
+	runGitHTTP(t, sourceDir, "add", "README.md")
+	runGitHTTP(t, sourceDir, "commit", "-m", "head")
+	headHash := strings.TrimSpace(runGitHTTP(t, sourceDir, "rev-parse", "HEAD"))
+	bundlePath := filepath.Join(t.TempDir(), "push.bundle")
+	tempRef := "refs/gitthicket/push/test"
+	runGitHTTP(t, sourceDir, "update-ref", tempRef, "HEAD")
+	runGitHTTP(t, sourceDir, "bundle", "create", bundlePath, tempRef)
+	runGitHTTP(t, sourceDir, "update-ref", "-d", tempRef)
+	return sourceDir, bundlePath, rootHash, headHash
+}
+
+func extractServer(t *testing.T, handler http.Handler) *server.Server {
+	t.Helper()
+	srv, ok := handler.(*server.Server)
+	if !ok {
+		t.Fatalf("expected *server.Server, got %T", handler)
+	}
+	return srv
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file %s: %v", path, err)
+	}
+	return data
+}
+
+func gitRefExists(t *testing.T, repoPath, ref string) bool {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", "-C", repoPath, "show-ref", "--verify", "--quiet", ref)
+	return cmd.Run() == nil
+}
+
 func runGitHTTP(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "git", args...)
@@ -231,9 +363,18 @@ func doJSONRequest(t *testing.T, handler http.Handler, method, path, bearer stri
 
 func doRequest(t *testing.T, handler http.Handler, method, path, bearer string, body []byte, contentType string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	authorization := ""
 	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+		authorization = "Bearer " + bearer
+	}
+	return doRawRequest(t, handler, method, path, authorization, body, contentType)
+}
+
+func doRawRequest(t *testing.T, handler http.Handler, method, path, authorization string, body []byte, contentType string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
@@ -241,6 +382,23 @@ func doRequest(t *testing.T, handler http.Handler, method, path, bearer string, 
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 	return rr
+}
+
+func assertJSONError(t *testing.T, rr *httptest.ResponseRecorder, status int, contains string) {
+	t.Helper()
+	if rr.Code != status {
+		t.Fatalf("expected status %d, got %d body=%s", status, rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("expected json content-type, got %q", got)
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	decodeJSONBody(t, rr.Body.Bytes(), &payload)
+	if !strings.Contains(payload.Error, contains) {
+		t.Fatalf("expected error containing %q, got %q", contains, payload.Error)
+	}
 }
 
 func decodeJSONBody(t *testing.T, body []byte, out any) {

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -47,9 +48,9 @@ func AgentFromContext(ctx context.Context) (*model.Agent, bool) {
 
 func (a *Authenticator) AgentMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := bearerToken(r.Header.Get("Authorization"))
-		if !ok {
-			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+		token, err := bearerToken(r.Header.Get("Authorization"))
+		if err != nil {
+			writeJSONError(w, http.StatusUnauthorized, err.Error())
 			return
 		}
 
@@ -57,14 +58,14 @@ func (a *Authenticator) AgentMiddleware(next http.Handler) http.Handler {
 		if err != nil {
 			switch {
 			case errors.Is(err, db.ErrNotFound):
-				http.Error(w, "invalid api key", http.StatusUnauthorized)
+				writeJSONError(w, http.StatusUnauthorized, "invalid api key")
 			default:
-				http.Error(w, "authentication failed", http.StatusInternalServerError)
+				writeJSONError(w, http.StatusInternalServerError, "internal authentication failure")
 			}
 			return
 		}
 		if agentRecord.DisabledAt != nil {
-			http.Error(w, "invalid api key", http.StatusUnauthorized)
+			writeJSONError(w, http.StatusUnauthorized, "disabled agent key")
 			return
 		}
 
@@ -75,27 +76,37 @@ func (a *Authenticator) AgentMiddleware(next http.Handler) http.Handler {
 
 func (a *Authenticator) AdminMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := bearerToken(r.Header.Get("Authorization"))
-		if !ok || token != a.adminKey {
-			http.Error(w, "invalid admin key", http.StatusUnauthorized)
+		token, err := bearerToken(r.Header.Get("Authorization"))
+		if err != nil {
+			writeJSONError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
+		if token != a.adminKey {
+			writeJSONError(w, http.StatusUnauthorized, "invalid admin key")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func bearerToken(header string) (string, bool) {
+func bearerToken(header string) (string, error) {
 	header = strings.TrimSpace(header)
 	if header == "" {
-		return "", false
+		return "", errors.New("missing bearer token")
 	}
 	parts := strings.SplitN(header, " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return "", false
+		return "", errors.New("malformed bearer token")
 	}
 	token := strings.TrimSpace(parts[1])
 	if token == "" {
-		return "", false
+		return "", errors.New("malformed bearer token")
 	}
-	return token, true
+	return token, nil
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }

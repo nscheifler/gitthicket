@@ -36,9 +36,14 @@ type Repo struct {
 }
 
 type StagedBundle struct {
-	repo     *Repo
-	tempRefs []string
-	commits  []model.Commit
+	repo           *Repo
+	validationRepo *Repo
+	tempRefs       []string
+	commits        []model.Commit
+}
+
+type PromoteResult struct {
+	CreatedRefs []string
 }
 
 type bundleHead struct {
@@ -135,8 +140,17 @@ func (r *Repo) StageBundle(ctx context.Context, bundlePath string) (*StagedBundl
 		return nil, fmt.Errorf("%w: bundle contains too many heads", ErrInvalidBundle)
 	}
 
+	validationRepo, err := r.createValidationRepo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cleanupValidationRepo := func() {
+		_ = os.RemoveAll(filepath.Dir(validationRepo.Path))
+	}
+
 	stageID, err := randomID(8)
 	if err != nil {
+		cleanupValidationRepo()
 		return nil, fmt.Errorf("generate stage id: %w", err)
 	}
 	tempRefs := make([]string, 0, len(heads))
@@ -148,21 +162,29 @@ func (r *Repo) StageBundle(ctx context.Context, bundlePath string) (*StagedBundl
 	}
 
 	args := append([]string{"fetch", "--quiet", bundlePath}, specs...)
-	if _, err := r.runGit(ctx, args...); err != nil {
-		r.deleteRefs(context.Background(), tempRefs)
-		return nil, fmt.Errorf("%w: fetch bundle into staging refs: %v", ErrInvalidBundle, err)
+	if _, err := validationRepo.runGit(ctx, args...); err != nil {
+		cleanupValidationRepo()
+		return nil, fmt.Errorf("%w: fetch bundle into validation repo: %v", ErrInvalidBundle, err)
 	}
 
-	commits, err := r.enumerateCommits(ctx, tempRefs, prerequisites)
+	for _, tempRef := range tempRefs {
+		if _, err := validationRepo.ResolveCommit(ctx, tempRef); err != nil {
+			cleanupValidationRepo()
+			return nil, fmt.Errorf("%w: advertised head does not resolve to a commit", ErrInvalidBundle)
+		}
+	}
+
+	commits, err := validationRepo.enumerateCommits(ctx, tempRefs, prerequisites)
 	if err != nil {
-		r.deleteRefs(context.Background(), tempRefs)
+		cleanupValidationRepo()
 		return nil, err
 	}
 
 	return &StagedBundle{
-		repo:     r,
-		tempRefs: tempRefs,
-		commits:  commits,
+		repo:           r,
+		validationRepo: validationRepo,
+		tempRefs:       tempRefs,
+		commits:        commits,
 	}, nil
 }
 
@@ -172,23 +194,49 @@ func (s *StagedBundle) Commits() []model.Commit {
 	return commits
 }
 
-func (s *StagedBundle) Promote(ctx context.Context, hashes []string) error {
+func (s *StagedBundle) Promote(ctx context.Context, hashes []string) (*PromoteResult, error) {
 	if len(hashes) == 0 {
-		return nil
+		return &PromoteResult{}, nil
 	}
 	for _, hash := range hashes {
 		if !validHash(hash) {
-			return fmt.Errorf("invalid commit hash %q", hash)
-		}
-		if _, err := s.repo.runGit(ctx, "update-ref", CommitRef(hash), hash); err != nil {
-			return fmt.Errorf("promote commit ref %s: %w", hash, err)
+			return nil, fmt.Errorf("invalid commit hash %q", hash)
 		}
 	}
-	return nil
+
+	fetchSpecs := make([]string, 0, len(s.tempRefs))
+	for _, tempRef := range s.tempRefs {
+		fetchSpecs = append(fetchSpecs, tempRef+":"+tempRef)
+	}
+	args := append([]string{"fetch", "--quiet", s.validationRepo.Path}, fetchSpecs...)
+	if _, err := s.repo.runGit(ctx, args...); err != nil {
+		_ = s.repo.deleteRefs(context.Background(), s.tempRefs)
+		return nil, fmt.Errorf("import validated bundle into canonical repo: %w", err)
+	}
+	defer s.repo.deleteRefs(context.Background(), s.tempRefs)
+
+	result := &PromoteResult{}
+	for _, hash := range hashes {
+		ref := CommitRef(hash)
+		existed, err := s.repo.hasRef(ctx, ref)
+		if err != nil {
+			return nil, fmt.Errorf("check commit ref %s: %w", hash, err)
+		}
+		if _, err := s.repo.runGit(ctx, "update-ref", ref, hash); err != nil {
+			return nil, fmt.Errorf("promote commit ref %s: %w", hash, err)
+		}
+		if !existed {
+			result.CreatedRefs = append(result.CreatedRefs, hash)
+		}
+	}
+	return result, nil
 }
 
 func (s *StagedBundle) Cleanup(ctx context.Context) error {
-	return s.repo.deleteRefs(ctx, s.tempRefs)
+	if s.validationRepo == nil {
+		return nil
+	}
+	return os.RemoveAll(filepath.Dir(s.validationRepo.Path))
 }
 
 func (r *Repo) HasCommit(ctx context.Context, hash string) (bool, error) {
@@ -204,6 +252,17 @@ func (r *Repo) HasCommit(ctx context.Context, hash string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+func (r *Repo) DeleteCommitRefs(ctx context.Context, hashes []string) error {
+	refs := make([]string, 0, len(hashes))
+	for _, hash := range hashes {
+		if !validHash(hash) {
+			continue
+		}
+		refs = append(refs, CommitRef(hash))
+	}
+	return r.deleteRefs(ctx, refs)
 }
 
 func (r *Repo) CreateBundleForCommit(ctx context.Context, hash string) (string, func(), error) {
@@ -418,15 +477,36 @@ func (r *Repo) deleteRefs(ctx context.Context, refs []string) error {
 	return firstErr
 }
 
+func (r *Repo) createValidationRepo(ctx context.Context) (*Repo, error) {
+	baseDir, err := os.MkdirTemp("", "gitthicket-validate-*")
+	if err != nil {
+		return nil, fmt.Errorf("create validation temp dir: %w", err)
+	}
+	validationPath := filepath.Join(baseDir, "repo.git")
+	cmd := exec.CommandContext(ensureTimeout(ctx), "git", "clone", "--bare", "--quiet", "--no-hardlinks", r.Path, validationPath)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.RemoveAll(baseDir)
+		return nil, fmt.Errorf("clone validation repo: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return &Repo{Path: validationPath}, nil
+}
+
+func (r *Repo) hasRef(ctx context.Context, ref string) (bool, error) {
+	_, err := r.runGit(ctx, "show-ref", "--verify", "--quiet", ref)
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return false, nil
+	}
+	return false, err
+}
+
 func (r *Repo) runGit(ctx context.Context, args ...string) ([]byte, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultCommandTimeout)
-		defer cancel()
-	}
+	ctx = ensureTimeout(ctx)
 	cmdArgs := make([]string, 0, len(args)+2)
 	if filepath.IsAbs(r.Path) {
 		cmdArgs = append(cmdArgs, "-C", r.Path)
@@ -439,6 +519,17 @@ func (r *Repo) runGit(ctx context.Context, args ...string) ([]byte, error) {
 		return out, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+func ensureTimeout(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx
+	}
+	ctx, _ = context.WithTimeout(ctx, defaultCommandTimeout)
+	return ctx
 }
 
 func revArgs(tempRefs, prerequisites []string) []string {

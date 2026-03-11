@@ -35,13 +35,16 @@ type Config struct {
 	DiffMaxBytes      int
 }
 
+type commitIndexer func(context.Context, []model.Commit, *string) ([]string, error)
+
 type Server struct {
-	db      *store.DB
-	repo    *gitrepo.Repo
-	auth    *auth.Authenticator
-	limiter *ratelimit.Limiter
-	cfg     Config
-	mux     *http.ServeMux
+	db            *store.DB
+	repo          *gitrepo.Repo
+	auth          *auth.Authenticator
+	limiter       *ratelimit.Limiter
+	cfg           Config
+	mux           *http.ServeMux
+	commitIndexer commitIndexer
 }
 
 type errorResponse struct {
@@ -85,12 +88,13 @@ func New(cfg Config, db *store.DB, repo *gitrepo.Repo, authenticator *auth.Authe
 		cfg.DiffMaxBytes = defaultDiffBytes
 	}
 	s := &Server{
-		db:      db,
-		repo:    repo,
-		auth:    authenticator,
-		limiter: ratelimit.New(),
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
+		db:            db,
+		repo:          repo,
+		auth:          authenticator,
+		limiter:       ratelimit.New(),
+		cfg:           cfg,
+		mux:           http.NewServeMux(),
+		commitIndexer: db.UpsertCommits,
 	}
 	s.routes()
 	return s
@@ -98,6 +102,22 @@ func New(cfg Config, db *store.DB, repo *gitrepo.Repo, authenticator *auth.Authe
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+func (s *Server) SetCommitIndexerForTest(fn func(context.Context, []model.Commit, *string) ([]string, error)) {
+	if fn == nil {
+		s.commitIndexer = s.db.UpsertCommits
+		return
+	}
+	s.commitIndexer = fn
+}
+
+func (s *Server) SetCommitIndexerForTests(indexer func(context.Context, []model.Commit, *string) ([]string, error)) {
+	if indexer == nil {
+		s.commitIndexer = s.db.UpsertCommits
+		return
+	}
+	s.commitIndexer = indexer
 }
 
 func (s *Server) routes() {
@@ -278,12 +298,14 @@ func (s *Server) handleGitPush(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := staged.Promote(r.Context(), newHashes); err != nil {
+	promoted, err := staged.Promote(r.Context(), newHashes)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to promote imported commits"})
 		return
 	}
-	imported, err := s.db.UpsertCommits(r.Context(), commits, &agent.ID)
+	imported, err := s.commitIndexer(r.Context(), commits, &agent.ID)
 	if err != nil {
+		_ = s.repo.DeleteCommitRefs(context.Background(), promoted.CreatedRefs)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to index imported commits"})
 		return
 	}
