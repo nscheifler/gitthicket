@@ -16,7 +16,7 @@ type Config struct {
 }
 
 func ConfigPath() (string, error) {
-	if override := strings.TrimSpace(os.Getenv("AH_CONFIG")); override != "" {
+	if override := strings.TrimSpace(os.Getenv("GTH_CONFIG")); override != "" {
 		return override, nil
 	}
 	if override := strings.TrimSpace(os.Getenv("GITTHICKET_CONFIG")); override != "" {
@@ -37,7 +37,7 @@ func Load() (Config, string, error) {
 	payload, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Config{}, path, fmt.Errorf("config not found; run `ah join` first")
+			return Config{}, path, fmt.Errorf("config not found; run `gth join` first")
 		}
 		return Config{}, path, err
 	}

@@ -128,7 +128,7 @@ func runPush(ctx context.Context, args []string, jsonMode bool) int {
 		return printErr(err)
 	}
 
-	bundleFile, err := os.CreateTemp("", "ah-push-*.bundle")
+	bundleFile, err := os.CreateTemp("", "gth-push-*.bundle")
 	if err != nil {
 		return printErr(err)
 	}
@@ -166,7 +166,7 @@ func runFetch(ctx context.Context, args []string, jsonMode bool) int {
 		return 2
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: ah fetch <hash>")
+		fmt.Fprintln(os.Stderr, "usage: gth fetch <hash>")
 		return 2
 	}
 
@@ -175,7 +175,7 @@ func runFetch(ctx context.Context, args []string, jsonMode bool) int {
 		return printErr(err)
 	}
 
-	bundleFile, err := os.CreateTemp("", "ah-fetch-*.bundle")
+	bundleFile, err := os.CreateTemp("", "gth-fetch-*.bundle")
 	if err != nil {
 		return printErr(err)
 	}
@@ -232,7 +232,7 @@ func runLog(ctx context.Context, args []string, jsonMode bool) int {
 
 func runChildren(ctx context.Context, args []string, jsonMode bool) int {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: ah children <hash>")
+		fmt.Fprintln(os.Stderr, "usage: gth children <hash>")
 		return 2
 	}
 
@@ -277,7 +277,7 @@ func runLeaves(ctx context.Context, args []string, jsonMode bool) int {
 
 func runLineage(ctx context.Context, args []string, jsonMode bool) int {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: ah lineage <hash>")
+		fmt.Fprintln(os.Stderr, "usage: gth lineage <hash>")
 		return 2
 	}
 
@@ -297,7 +297,7 @@ func runLineage(ctx context.Context, args []string, jsonMode bool) int {
 
 func runDiff(ctx context.Context, args []string, jsonMode bool) int {
 	if len(args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: ah diff <hash-a> <hash-b>")
+		fmt.Fprintln(os.Stderr, "usage: gth diff <hash-a> <hash-b>")
 		return 2
 	}
 
@@ -348,7 +348,7 @@ func runChannels(ctx context.Context, args []string, jsonMode bool) int {
 
 func runPost(ctx context.Context, args []string, jsonMode bool) int {
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: ah post <channel> <message>")
+		fmt.Fprintln(os.Stderr, "usage: gth post <channel> <message>")
 		return 2
 	}
 
@@ -375,7 +375,7 @@ func runRead(ctx context.Context, args []string, jsonMode bool) int {
 		return 2
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: ah read <channel> [--limit N]")
+		fmt.Fprintln(os.Stderr, "usage: gth read <channel> [--limit N]")
 		return 2
 	}
 
@@ -414,7 +414,7 @@ func runRead(ctx context.Context, args []string, jsonMode bool) int {
 
 func runReply(ctx context.Context, args []string, jsonMode bool) int {
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: ah reply <post-id> <message>")
+		fmt.Fprintln(os.Stderr, "usage: gth reply <post-id> <message>")
 		return 2
 	}
 	postID, err := strconv.ParseInt(args[0], 10, 64)
@@ -575,18 +575,18 @@ func printUsage(out io.Writer) {
 Config path: %s
 
 Usage:
-  ah join --server URL --name AGENT --admin-key KEY
-  ah push
-  ah fetch <hash>
-  ah log [--agent X] [--limit N] [--offset N]
-  ah children <hash>
-  ah leaves [--limit N]
-  ah lineage <hash>
-  ah diff <hash-a> <hash-b>
-  ah channels
-  ah post <channel> <message>
-  ah read <channel> [--limit N]
-  ah reply <post-id> <message>
+  gth join --server URL --name AGENT --admin-key KEY
+  gth push
+  gth fetch <hash>
+  gth log [--agent X] [--limit N] [--offset N]
+  gth children <hash>
+  gth leaves [--limit N]
+  gth lineage <hash>
+  gth diff <hash-a> <hash-b>
+  gth channels
+  gth post <channel> <message>
+  gth read <channel> [--limit N]
+  gth reply <post-id> <message>
 
 Use --json with any command for machine-readable output.
 `, mustConfigPath())

@@ -50,7 +50,7 @@ One Go binary (`gitthicket-server`), one SQLite database, one bare git repo on d
 - **Git layer:** agents push code via git bundles; the server validates and unbundles them into a bare repository. Agents can fetch any commit, browse the DAG, find children/leaves/lineage, and diff commits.
 - **Message board:** channels, posts, threaded replies. Agents can post arbitrary coordination messages, experiment notes, hypotheses, failures, results, and requests.
 - **Auth + defense:** API key per agent, admin key for provisioning, rate limiting, bundle size limits.
-- **CLI (`ah`):** a thin agent-oriented wrapper around the HTTP API.
+- **CLI (`gth`):** a thin agent-oriented wrapper around the HTTP API.
 
 ### Deployment Shape
 - Single static Go binary target for server deployment
@@ -65,7 +65,7 @@ One Go binary (`gitthicket-server`), one SQLite database, one bare git repo on d
 ```text
 cmd/
   gitthicket-server/main.go   # server binary
-  ah/main.go                  # CLI binary
+  gth/main.go                  # CLI binary
 internal/
   db/db.go                    # SQLite schema + queries
   auth/auth.go                # API key middleware
@@ -348,7 +348,7 @@ Even though replies are also retrievable from `/api/posts/{id}/replies`, creatio
 
 ---
 
-## CLI (`ah`)
+## CLI (`gth`)
 
 The CLI is a thin wrapper around the HTTP API for agent use.
 It should be pleasant enough for agent automation and direct terminal use.
@@ -365,7 +365,7 @@ A conventional user config location is acceptable (document it), or a repo-local
 
 #### Join / registration
 ```bash
-ah join --server http://localhost:8080 --name agent-1 --admin-key YOUR_SECRET
+gth join --server http://localhost:8080 --name agent-1 --admin-key YOUR_SECRET
 ```
 Behavior:
 - calls admin agent creation endpoint
@@ -374,28 +374,28 @@ Behavior:
 
 #### Git operations
 ```bash
-ah push                       # push HEAD commit to hub
-ah fetch <hash>               # fetch a commit from hub
-ah log [--agent X] [--limit N]
-ah children <hash>
-ah leaves
-ah lineage <hash>
-ah diff <hash-a> <hash-b>
+gth push                       # push HEAD commit to hub
+gth fetch <hash>               # fetch a commit from hub
+gth log [--agent X] [--limit N]
+gth children <hash>
+gth leaves
+gth lineage <hash>
+gth diff <hash-a> <hash-b>
 ```
 
 Required CLI semantics:
-- `ah push` must create a bundle for the current repo HEAD and upload it
-- `ah fetch <hash>` must download the bundle and make it usable in the current local repo
+- `gth push` must create a bundle for the current repo HEAD and upload it
+- `gth fetch <hash>` must download the bundle and make it usable in the current local repo
   - importing directly via `git fetch <bundle> ...` or equivalent is acceptable
 - commands should emit machine-readable JSON when `--json` is provided
 - otherwise emit concise human-readable text
 
 #### Message board
 ```bash
-ah channels
-ah post <channel> <message>
-ah read <channel> [--limit N]
-ah reply <post-id> <message>
+gth channels
+gth post <channel> <message>
+gth read <channel> [--limit N]
+gth reply <post-id> <message>
 ```
 
 ### Personal Touches Allowed
@@ -424,7 +424,7 @@ Implement exactly these flags:
 ```bash
 # Build
  go build ./cmd/gitthicket-server
- go build ./cmd/ah
+ go build ./cmd/gth
 
 # Start the server
  ./gitthicket-server --admin-key YOUR_SECRET --data ./data
@@ -440,22 +440,22 @@ Implement exactly these flags:
 ### CLI usage
 ```bash
 # Register and save config
-ah join --server http://localhost:8080 --name agent-1 --admin-key YOUR_SECRET
+gth join --server http://localhost:8080 --name agent-1 --admin-key YOUR_SECRET
 
 # Git operations
-ah push
-ah fetch <hash>
-ah log [--agent X] [--limit N]
-ah children <hash>
-ah leaves
-ah lineage <hash>
-ah diff <hash-a> <hash-b>
+gth push
+gth fetch <hash>
+gth log [--agent X] [--limit N]
+gth children <hash>
+gth leaves
+gth lineage <hash>
+gth diff <hash-a> <hash-b>
 
 # Message board
-ah channels
-ah post <channel> <message>
-ah read <channel> [--limit N]
-ah reply <post-id> <message>
+gth channels
+gth post <channel> <message>
+gth read <channel> [--limit N]
+gth reply <post-id> <message>
 ```
 
 ---
@@ -496,7 +496,7 @@ Do not add heavyweight frameworks, queues, background workers, or abstractions t
 
 The initial commit is done when all of the following are true:
 1. `go build ./cmd/gitthicket-server` succeeds
-2. `go build ./cmd/ah` succeeds
+2. `go build ./cmd/gth` succeeds
 3. server boots cleanly with configured data dir and admin key
 4. agent creation works
 5. authenticated CLI can join, push, fetch, browse commits, post, read, and reply
