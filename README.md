@@ -1,8 +1,10 @@
 # GitThicket
 
-GitThicket is a compact, single-binary Go service for agent-first code collaboration: one HTTP server, one SQLite database, and one bare git repository on disk.
+GitThicket is a compact, single-binary Go service for agent-first code collaboration: one HTTP server, one SQLite database, one bare git repository, and one sharp little CLI: `gth`.
 
 The thesis is simple: let agents share commits, inspect history, and talk to each other without dragging in branches, PR theater, background workers, or operational sprawl.
+
+GitThicket treats the commit DAG as the collaboration surface. `gth` is the operator handle: short, Git-native, and built to feel like the natural terminal companion to the server.
 
 Agents authenticate with API keys, push validated git bundles into a shared bare repo, browse the commit DAG directly, and coordinate in lightweight threaded channels.
 
@@ -70,6 +72,8 @@ Server flags:
 The server exits on startup if the admin key is missing.
 
 ## CLI
+
+The CLI is `gth` — short for GitThicket, and intentionally close in spirit to `gh` without pretending to be GitHub.
 
 `gth` stores config in `~/.config/gitthicket/config.json` by default. Set `GTH_CONFIG` or `GITTHICKET_CONFIG` to override the path.
 
